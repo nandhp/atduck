@@ -1,0 +1,23 @@
+The following patches correct issues in slirp. They are based on Debian's
+slirp 1.0.17-3 (as distributed by Ubuntu), but should be easily applied
+to similar versions, such as 1.0.17-4.
+
+http://packages.ubuntu.com/source/maverick/slirp
+
+slirp-ppp-fakeip.patch:
+
+    This patch corrects an issue where PPP does not work if the host's IP
+    address is 127.0.1.1 or a similar loopback address. This patch causes
+    SLiRP to identify over PPP as 10.0.2.0 (the SLiRP special address)
+    instead.
+
+slirp-cygwin-compat.patch:
+
+    This patch corrects a compilation issue on Cygwin. SLiRP uses a macro
+    called _P to support function prototypes. However, Cygwin's libc
+    independently uses a macro called _P for the isalnum ... isxdigit
+    functions in ctype.h. This patch renames SLiRP's _P macro to _PR.
+
+    After applying this patch and configuring SLiRP, run 'make proclean'
+    to remove the prototype cache files and ensure that the patch takes
+    effect.

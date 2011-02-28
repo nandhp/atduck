@@ -1,0 +1,27 @@
+--- slirp-1.0.17.debian/src/options.c	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/options.c	2011-02-26 08:26:58.000000000 -0500
+@@ -1153,7 +1153,7 @@
+ setipdefault(unit)
+ 	int unit;
+ {
+-	struct hostent *hp;
++	struct in_addr hp = special_addr;
+ 	u_int32_t local;
+ 	ipcp_options *wo = &ipcp_wantoptions[unit];
+ 
+@@ -1169,9 +1169,12 @@
+ 	 * If there isn't an IP address for our hostname, too bad.
+ 	 */
+ 	wo->accept_local = 1;       /* don't insist on this default value */
+-	if ((hp = gethostbyname(hostname)) == NULL)
+-	   return;
+-	local = *(u_int32_t *)hp->h_addr;
++	/* nandhp: Use the SLiRP special address instead of the host's real
++	 * address for the PPP gateway. This way it works if the host hasn't
++	 * got a real IP address. If the special address is not yet customized,
++	 * use the default 10.0.2.0 */
++	if (hp.s_addr == -1) inet_aton(CTL_SPECIAL, &hp);
++	local = (u_int32_t)hp.s_addr;
+ 	if (local != 0 && !bad_ip_adrs(local))
+ 	   wo->ouraddr = local;
+ 

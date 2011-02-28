@@ -1,0 +1,455 @@
+diff -ur slirp-1.0.17.debian/src/debug.c slirp-1.0.17/src/debug.c
+--- slirp-1.0.17.debian/src/debug.c	2006-05-18 15:22:46.000000000 -0400
++++ slirp-1.0.17/src/debug.c	2011-02-26 08:13:44.000000000 -0500
+@@ -16,7 +16,7 @@
+ #endif
+ int slirp_debug = 0;
+ 
+-extern char *strerror _P((int));
++extern char *strerror _PR((int));
+ 
+ /* Carry over one item from main.c so that the tty's restored.
+  * Only done when the tty being used is /dev/tty --RedWolf */
+@@ -339,7 +339,7 @@
+ 	DEBUG_ARG("exit_status = %d", exit_status);
+ 
+ 	if (dostats) {
+-		lprint_print = (int (*) _P((void *, const char *, va_list)))vfprintf;
++		lprint_print = (int (*) _PR((void *, const char *, va_list)))vfprintf;
+ 		if (!dfd)
+ 		   debug_init("slirp_stats", 0xf);
+ 		lprint_arg = (char **)&dfd;
+diff -ur slirp-1.0.17.debian/src/main.c slirp-1.0.17/src/main.c
+--- slirp-1.0.17.debian/src/main.c	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/main.c	2011-02-26 08:13:51.000000000 -0500
+@@ -38,7 +38,7 @@
+ 
+ struct ttys *ttys;
+ 
+-extern void alrm _P((int));
++extern void alrm _PR((int));
+ 
+ struct in_addr our_addr;
+ struct in_addr ctl_addr;
+@@ -70,7 +70,7 @@
+ 	char **argv;
+ {
+ 
+-	lprint_print = (int (*) _P((void *, const char *, va_list)))vfprintf;
++	lprint_print = (int (*) _PR((void *, const char *, va_list)))vfprintf;
+ 	lprint_ptr2 = (char *)stderr;
+ 	lprint_arg = (char **)&lprint_ptr2;
+ 
+diff -ur slirp-1.0.17.debian/src/misc.c slirp-1.0.17/src/misc.c
+--- slirp-1.0.17.debian/src/misc.c	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/misc.c	2011-02-26 08:13:59.000000000 -0500
+@@ -591,7 +591,7 @@
+ 	exit(1);
+ }
+ 
+-int (*lprint_print) _P((void *, const char *, va_list));
++int (*lprint_print) _PR((void *, const char *, va_list));
+ char *lprint_ptr, *lprint_ptr2, **lprint_arg;
+ 
+ void
+diff -ur slirp-1.0.17.debian/src/misc.h slirp-1.0.17/src/misc.h
+--- slirp-1.0.17.debian/src/misc.h	2004-09-01 03:36:45.000000000 -0400
++++ slirp-1.0.17/src/misc.h	2011-02-26 08:14:33.000000000 -0500
+@@ -19,15 +19,15 @@
+ extern struct ex_list *exec_list;
+ extern u_int curtime, time_fasttimo, last_slowtimo, detach_time, detach_wait;
+ 
+-extern int (*lprint_print) _P((void *, const char *, va_list));
++extern int (*lprint_print) _PR((void *, const char *, va_list));
+ extern char *lprint_ptr, *lprint_ptr2, **lprint_arg;
+ extern struct sbuf *lprint_sb;
+ 
+ #ifndef HAVE_STRDUP
+-char *strdup _P((const char *));
++char *strdup _PR((const char *));
+ #endif
+ 
+-void do_wait _P((int));
++void do_wait _PR((int));
+ 
+ #define EMU_NONE 0x0
+ 
+diff -ur slirp-1.0.17.debian/src/mkpro slirp-1.0.17/src/mkpro
+--- slirp-1.0.17.debian/src/mkpro	2004-09-01 05:58:51.000000000 -0400
++++ slirp-1.0.17/src/mkpro	2011-02-26 08:20:44.000000000 -0500
+@@ -72,7 +72,7 @@
+ 		if ($ignore_funcs{$1}) {
+ 			goto STATE0;
+ 		}
+-		$line[1] = "$1 _P((";
++		$line[1] = "$1 _PR((";
+ 		$nargs_guess = split(/,/, $2);
+ 		
+ 		$nargs = 0;
+diff -ur slirp-1.0.17.debian/src/options.c slirp-1.0.17/src/options.c
+--- slirp-1.0.17.debian/src/options.c	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/options.c	2011-02-26 08:26:58.000000000 -0500
+@@ -29,7 +29,7 @@
+ 
+ #include <ctype.h>
+ 
+-void readable _P((int fd));
++void readable _PR((int fd));
+ 
+ /*
+  * Option variables
+@@ -76,7 +76,7 @@
+  * Read the config file
+  */
+ 
+-int (*lprint_print) _P((void *, const char *format, va_list));
++int (*lprint_print) _PR((void *, const char *format, va_list));
+ char *lprint_ptr, *lprint_ptr2, **lprint_arg;
+ struct sbuf *lprint_sb;
+ 
+@@ -115,12 +115,12 @@
+ 	
+ 	switch (type) {
+ 	 case PRN_STDERR:
+-		lprint_print = (int (*) _P((void *, const char *, va_list)))vfprintf;
++		lprint_print = (int (*) _PR((void *, const char *, va_list)))vfprintf;
+ 		lprint_ptr2 = (char *)stderr;
+ 		lprint_arg = (char **)&lprint_ptr2;
+ 		break;
+ 	 case PRN_SPRINTF:
+-		lprint_print = (int (*) _P((void *, const char *, va_list)))vsprintf;
++		lprint_print = (int (*) _PR((void *, const char *, va_list)))vsprintf;
+ 		lprint_sb = &inso->so_snd;
+ 		lprint_ptr2 = lprint_sb->sb_wptr;
+ 		lprint_ptr = lprint_sb->sb_wptr;
+diff -ur slirp-1.0.17.debian/src/options.h slirp-1.0.17/src/options.h
+--- slirp-1.0.17.debian/src/options.h	2004-09-01 03:36:45.000000000 -0400
++++ slirp-1.0.17/src/options.h	2011-02-26 08:14:39.000000000 -0500
+@@ -11,7 +11,7 @@
+ struct cfgtab {
+ 	char *command;
+ 	char *command_line;
+-	int (*func) _P((char *, struct socket *));
++	int (*func) _PR((char *, struct socket *));
+ 	u_char type;
+ 	u_char flags;
+ 	char *usage_args;
+diff -ur slirp-1.0.17.debian/src/ppp/auth.c slirp-1.0.17/src/ppp/auth.c
+--- slirp-1.0.17.debian/src/ppp/auth.c	2004-09-06 21:50:08.000000000 -0400
++++ slirp-1.0.17/src/ppp/auth.c	2011-02-26 08:15:59.000000000 -0500
+@@ -66,7 +66,7 @@
+ #include <alloca.h>
+ #endif /*sparc*/
+ 
+-extern char *crypt _P((const char *, const char *));
++extern char *crypt _PR((const char *, const char *));
+ 
+ /* Used for storing a sequence of words.  Usually malloced. */
+ struct wordlist {
+diff -ur slirp-1.0.17.debian/src/ppp/options.h slirp-1.0.17/src/ppp/options.h
+--- slirp-1.0.17.debian/src/ppp/options.h	2004-09-01 03:36:52.000000000 -0400
++++ slirp-1.0.17/src/ppp/options.h	2011-02-26 08:17:44.000000000 -0500
+@@ -2,67 +2,67 @@
+  * Prototypes
+  */
+ /*
+-void setdebug _P((char *, struct socket *));
+-void setkdebug _P((char *, struct socket *));
+-void setpassive _P((char *, struct socket *));
+-void setinitopt _P((char *, struct socket *));
+-void noopt _P((char *, struct socket *));
+-void setnovj _P((char *, struct socket *));
+-void setnovjccomp _P((char *, struct socket *));
+-void setvjslots _P((char *, struct socket *));
+-void reqpap _P((char *, struct socket *));
+-void nopap _P((char *, struct socket *));
+-void setupapfile _P((char *, struct socket *));
+-void nochap _P((char *, struct socket *));
+-void reqchap _P((char *, struct socket *));
+-void setspeed _P((char *, struct socket *));
+-void noaccomp _P((char *, struct socket *));
+-void noasyncmap _P((char *, struct socket *));
+-void noipaddr _P((char *, struct socket *));
+-void nomagicnumber _P((char *, struct socket *));
+-void setasyncmap _P((char *, struct socket *));
+-void setescape _P((char *, struct socket *));
+-void setmru _P((char *, struct socket *));
+-void setmtu _P((char *, struct socket *));
+-void nomru _P((char *, struct socket *));
+-void nopcomp _P((char *, struct socket *));
+-void setconnector _P((char *, struct socket *));
+-void setdisconnector _P((char *, struct socket *));
+-void setdomain _P((char *, struct socket *));
+-void setnetmask _P((char *, struct socket *));
+-void setcrtscts _P((char *, struct socket *));
+-void setxonxoff _P((char *, struct socket *));
+-void setnodetach _P((char *, struct socket *));
+-void setmodem _P((char *, struct socket *));
+-void setlocal _P((char *, struct socket *));
+-void setlock _P((char *, struct socket *));
+-void setname _P((char *, struct socket *));
+-void set_user _P((char *, struct socket *));
+-void setremote _P((char *, struct socket *));
+-void setauth _P((char *, struct socket *));
+-void readfile _P((char *, struct socket *));
+-void setdefaultroute _P((char *, struct socket *));
+-void setproxyarp _P((char *, struct socket *));
+-void setpersist _P((char *, struct socket *));
+-void setdologin _P((char *, struct socket *));
+-void setusehostname _P((char *, struct socket *));
+-void setnoipdflt _P((char *, struct socket *));
+-void setlcptimeout _P((char *, struct socket *));
+-void setlcpterm _P((char *, struct socket *));
+-void setlcpconf _P((char *, struct socket *));
+-void setlcpfails _P((char *, struct socket *));
+-void setipcptimeout _P((char *, struct socket *));
+-void setipcpterm _P((char *, struct socket *));
+-void setipcpconf _P((char *, struct socket *));
+-void setipcpfails _P((char *, struct socket *));
+-void setpaptimeout _P((char *, struct socket *));
+-void setpapreqs _P((char *, struct socket *));
+-void setchaptimeout _P((char *, struct socket *));
+-void setchapchal _P((char *, struct socket *));
+-void setchapintv _P((char *, struct socket *));
+-void setipcpaccl _P((char *, struct socket *));
+-void setipcpaccr _P((char *, struct socket *));
+-void setlcpechointv _P((char *, struct socket *));
+-void setlcpechofails _P((char *, struct socket *));
++void setdebug _PR((char *, struct socket *));
++void setkdebug _PR((char *, struct socket *));
++void setpassive _PR((char *, struct socket *));
++void setinitopt _PR((char *, struct socket *));
++void noopt _PR((char *, struct socket *));
++void setnovj _PR((char *, struct socket *));
++void setnovjccomp _PR((char *, struct socket *));
++void setvjslots _PR((char *, struct socket *));
++void reqpap _PR((char *, struct socket *));
++void nopap _PR((char *, struct socket *));
++void setupapfile _PR((char *, struct socket *));
++void nochap _PR((char *, struct socket *));
++void reqchap _PR((char *, struct socket *));
++void setspeed _PR((char *, struct socket *));
++void noaccomp _PR((char *, struct socket *));
++void noasyncmap _PR((char *, struct socket *));
++void noipaddr _PR((char *, struct socket *));
++void nomagicnumber _PR((char *, struct socket *));
++void setasyncmap _PR((char *, struct socket *));
++void setescape _PR((char *, struct socket *));
++void setmru _PR((char *, struct socket *));
++void setmtu _PR((char *, struct socket *));
++void nomru _PR((char *, struct socket *));
++void nopcomp _PR((char *, struct socket *));
++void setconnector _PR((char *, struct socket *));
++void setdisconnector _PR((char *, struct socket *));
++void setdomain _PR((char *, struct socket *));
++void setnetmask _PR((char *, struct socket *));
++void setcrtscts _PR((char *, struct socket *));
++void setxonxoff _PR((char *, struct socket *));
++void setnodetach _PR((char *, struct socket *));
++void setmodem _PR((char *, struct socket *));
++void setlocal _PR((char *, struct socket *));
++void setlock _PR((char *, struct socket *));
++void setname _PR((char *, struct socket *));
++void set_user _PR((char *, struct socket *));
++void setremote _PR((char *, struct socket *));
++void setauth _PR((char *, struct socket *));
++void readfile _PR((char *, struct socket *));
++void setdefaultroute _PR((char *, struct socket *));
++void setproxyarp _PR((char *, struct socket *));
++void setpersist _PR((char *, struct socket *));
++void setdologin _PR((char *, struct socket *));
++void setusehostname _PR((char *, struct socket *));
++void setnoipdflt _PR((char *, struct socket *));
++void setlcptimeout _PR((char *, struct socket *));
++void setlcpterm _PR((char *, struct socket *));
++void setlcpconf _PR((char *, struct socket *));
++void setlcpfails _PR((char *, struct socket *));
++void setipcptimeout _PR((char *, struct socket *));
++void setipcpterm _PR((char *, struct socket *));
++void setipcpconf _PR((char *, struct socket *));
++void setipcpfails _PR((char *, struct socket *));
++void setpaptimeout _PR((char *, struct socket *));
++void setpapreqs _PR((char *, struct socket *));
++void setchaptimeout _PR((char *, struct socket *));
++void setchapchal _PR((char *, struct socket *));
++void setchapintv _PR((char *, struct socket *));
++void setipcpaccl _PR((char *, struct socket *));
++void setipcpaccr _PR((char *, struct socket *));
++void setlcpechointv _PR((char *, struct socket *));
++void setlcpechofails _PR((char *, struct socket *));
+ 
+ */
+diff -ur slirp-1.0.17.debian/src/ppp/ppp.h slirp-1.0.17/src/ppp/ppp.h
+--- slirp-1.0.17.debian/src/ppp/ppp.h	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/ppp/ppp.h	2011-02-26 08:18:40.000000000 -0500
+@@ -45,14 +45,14 @@
+ 
+ 
+ #ifdef __STDC__
+-void real_do_syslog _P((int priority, const char *format, ...));
++void real_do_syslog _PR((int priority, const char *format, ...));
+ #else
+ void real_do_syslog ();
+ #endif
+ 
+ #define do_syslog if(debug)real_do_syslog
+ 
+-void print_string _P((char *, int, void (*) _P((void *, char *, ...)), void *));
++void print_string _PR((char *, int, void (*) _PR((void *, char *, ...)), void *));
+ 
+ int bad_ip_adrs(u_int32_t addr);
+ void novm __P((char *));
+diff -ur slirp-1.0.17.debian/src/ppp.c slirp-1.0.17/src/ppp.c
+--- slirp-1.0.17.debian/src/ppp.c	2011-02-26 06:26:58.000000000 -0500
++++ slirp-1.0.17/src/ppp.c	2011-02-26 08:14:25.000000000 -0500
+@@ -917,7 +917,7 @@
+ print_string(p, len, printer, arg)
+     char *p;
+     int len;
+-    void (*printer) _P((void *, char *, ...));
++    void (*printer) _PR((void *, char *, ...));
+     void *arg;
+ {
+ 
+diff -ur slirp-1.0.17.debian/src/slirp.h slirp-1.0.17/src/slirp.h
+--- slirp-1.0.17.debian/src/slirp.h	2004-09-01 03:36:45.000000000 -0400
++++ slirp-1.0.17/src/slirp.h	2011-02-26 08:14:55.000000000 -0500
+@@ -72,11 +72,12 @@
+ 
+ #include <sys/uio.h>
+ 
+-#ifndef _P
++/* Rename _P to _PR, since cygwin libc uses _P in ctype.h isalnum...isxdigit */
++#ifndef _PR
+ #ifndef NO_PROTOTYPES
+-#  define   _P(x)   x
++#  define   _PR(x)   x
+ #else
+-#  define   _P(x)   ()
++#  define   _PR(x)   ()
+ #endif
+ #endif
+ 
+@@ -89,17 +90,17 @@
+ 
+ /* Systems lacking strdup() definition in <string.h>. */
+ #if defined(ultrix)
+-char *strdup _P((const char *));
++char *strdup _PR((const char *));
+ #endif
+ 
+ /* Systems lacking malloc() definition in <stdlib.h>. */
+ #if defined(ultrix) || defined(hcx)
+-void *malloc _P((size_t arg));
+-void free _P((void *ptr));
++void *malloc _PR((size_t arg));
++void free _PR((void *ptr));
+ #endif
+ 
+ #ifndef HAVE_INET_ATON
+-int inet_aton _P((const char *cp, struct in_addr *ia));
++int inet_aton _PR((const char *cp, struct in_addr *ia));
+ #endif
+ 
+ #include <fcntl.h>
+@@ -197,50 +198,50 @@
+ #endif
+ 
+ #ifndef FULL_BOLT
+-void if_start _P((void));
++void if_start _PR((void));
+ #else
+-void if_start _P((struct ttys *));
++void if_start _PR((struct ttys *));
+ #endif
+ 
+ #ifdef BAD_SPRINTF
+ # define vsprintf vsprintf_len
+ # define sprintf sprintf_len
+- extern int vsprintf_len _P((char *, const char *, va_list));
+- extern int sprintf_len _P((char *, const char *, ...));
++ extern int vsprintf_len _PR((char *, const char *, va_list));
++ extern int sprintf_len _PR((char *, const char *, ...));
+ #endif
+ 
+ #ifdef DECLARE_SPRINTF
+ # ifndef BAD_SPRINTF
+- extern int vsprintf _P((char *, const char *, va_list));
++ extern int vsprintf _PR((char *, const char *, va_list));
+ # endif
+- extern int vfprintf _P((FILE *, const char *, va_list));
++ extern int vfprintf _PR((FILE *, const char *, va_list));
+ #endif
+ 
+ #ifndef HAVE_STRERROR
+- extern char *strerror _P((int error));
++ extern char *strerror _PR((int error));
+ #endif
+ 
+ #ifndef HAVE_RANDOM
+- long random _P((void));
++ long random _PR((void));
+ #endif
+ 
+ #ifndef HAVE_SRANDOM
+- void srandom _P((int));
++ void srandom _PR((int));
+ #endif
+ 
+ #ifndef HAVE_INDEX
+- char *index _P((const char *, int));
++ char *index _PR((const char *, int));
+ #endif
+ 
+ #ifndef HAVE_BCMP
+- int bcmp _P((const void *, const void *, int));
++ int bcmp _PR((const void *, const void *, int));
+ #endif
+ 
+ #ifndef HAVE_GETHOSTID
+- long gethostid _P((void));
++ long gethostid _PR((void));
+ #endif
+ 
+-void lprint _P((const char *, ...));
++void lprint _PR((const char *, ...));
+ 
+ extern int do_echo;
+ 
+@@ -248,8 +249,8 @@
+ # define insque_32 insque
+ # define remque_32 remque
+ #else
+- inline void insque_32 _P((void *, void *));
+- inline void remque_32 _P((void *));
++ inline void insque_32 _PR((void *, void *));
++ inline void remque_32 _PR((void *));
+ #endif
+ 
+ #include <pwd.h>
+diff -ur slirp-1.0.17.debian/src/strtoul.c slirp-1.0.17/src/strtoul.c
+--- slirp-1.0.17.debian/src/strtoul.c	2004-09-01 03:36:44.000000000 -0400
++++ slirp-1.0.17/src/strtoul.c	2011-02-26 08:14:27.000000000 -0500
+@@ -37,7 +37,7 @@
+ #endif /* LIBC_SCCS and not lint */
+ 
+ #include "slirp.h"
+-unsigned long strtoul _P((const char *, char **, int));
++unsigned long strtoul _PR((const char *, char **, int));
+ #undef _P	/* used by <ctype.h> */
+ #include <limits.h>
+ #include <ctype.h>
+diff -ur slirp-1.0.17.debian/src/ttys.h slirp-1.0.17/src/ttys.h
+--- slirp-1.0.17.debian/src/ttys.h	2004-09-01 03:36:45.000000000 -0400
++++ slirp-1.0.17/src/ttys.h	2011-02-26 08:14:56.000000000 -0500
+@@ -57,8 +57,8 @@
+ 	struct slirp_ifstats ifstats;	/* Interface statistics */
+ 
+ 	u_int flags;		/* Misc flags, see below */
+-	void (*if_input) _P((struct ttys *, u_char *, int)); /* packet decapsulation and dispatch */
+-	int (*if_encap) _P((char *, struct mbuf *, int, int, int)); /* packet encapsulation routine */
++	void (*if_input) _PR((struct ttys *, u_char *, int)); /* packet decapsulation and dispatch */
++	int (*if_encap) _PR((char *, struct mbuf *, int, int, int)); /* packet encapsulation routine */
+ 
+ 	/* The following fields are for compression
+ 	 * XXX should put them around ifdef's
