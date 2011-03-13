@@ -1,0 +1,248 @@
+#!/usr/bin/perldoc
+
+=head1 NAME
+
+atduck - Hayes AT-compatible modem emulator
+
+=head1 SYNOPSIS
+
+B<atduck> [I<options>] [B<-l> I<address> [I<...>]] [I<address> [I<...>]]
+
+=head1 DESCRIPTION
+
+B<ATduck> emulates a Hayes AT-compatible modem.
+It is designed to be used with the virtual serial ports of QEMU, VMware, and other emulators; it can also be used with a physical serial port or a PTY.
+
+Common uses of B<ATduck> include using it with SLiRP to provide internet access over PPP, or with Kermit to transfer files.
+
+=head1 OPTIONS
+
+=over
+
+=item B<--listen>, B<-l> I<address>
+
+Listen for incoming connections on the given I<address> and provide a separate modem to each connection.
+
+=item B<--verbose>, B<--debug>, B<-D>
+
+Include transferred data in the console output.
+
+=item B<--help>
+
+Display a brief usage message.
+
+=item B<--version>
+
+Display version information.
+
+=back
+
+=head1 TRANSPORT ADDRESS SPECIFICATIONS
+
+B<ATduck> can provide modems using several transport methods.
+The most methods common are TCP and UNIX sockets.
+Except where noted, B<ATduck> can either connect to an existing server and provide a single modem or, when used with B<-l>, operate as a server and provide a modem for each incoming connection.
+
+=over
+
+=item [B<UNIX:>]I<filename>
+
+Connect to or listen on a UNIX socket in I<filename>.
+
+=item [B<TCP:>][I<hostname>B<:>]I<port>
+
+Connect to or listen on I<port> using a TCP socket.
+If unspecified, I<hostname> defaults to B<localhost>.
+For a listening socket to accept connections from other computers, the hostname B<0.0.0.0> must be explicitly specified.
+
+=item B<PTY>[B<:>I<filename>]
+
+Create a PTY.
+If specified, a symbolic link to the PTY is created in I<filename>.
+This method cannot be used as a listener.
+
+=item [B<OPEN:>]I<filename>
+
+Open the existing named pipe, PTY, serial port, etc. in I<filename>.
+This method cannot be used as a listener.
+
+=back
+
+=head1 DIALING PLAN
+
+The following dialing plan is configured by default.
+
+=over
+
+=item B<5550>
+
+Connect to a shell on the host
+
+=item B<5555>
+
+SLiRP (PPP mode)
+
+=item B<5556>
+
+SLiRP (SLIP mode)
+
+=item B<6>I<xxx>
+
+Call another emulated modem by serial number.
+For example, dialing I<6006> will connect you to the modem with serial number I<6>.
+To determine your modem's serial number use B<AT+GSN>.
+Note that serial numbers are not fixed between sessions.
+
+=begin comment
+
+=item B<8>I<aaabbbcccdddeeeee> (FIXME)
+
+Establish a Telnet connection to I<aaa>B<.>I<bbb>B<.>I<ccc>B<.>I<ddd> on port I<eeeee>.
+Each octet of the IP address must be padded by zeros to 3 digits, the port must be 5 digits.
+
+=item B<9>I<number> (FIXME)
+
+Dial I<number> using the physical modem, if available.
+
+=end comment
+
+=back
+
+=head1 EXAMPLE
+
+This example suggests ways to set up B<ATduck> with several popular emulators.
+It does not necessarily illustrate the best way to use B<ATduck> with a given emulator.
+
+First, start B<ATduck> with a transport method that is compatible with the emulator:
+
+B<atduck -l> I</tmp/modem>         (to listen on a UNIX socket)
+
+B<atduck -l localhost:>I<5555>     (to listen on a TCP socket)
+
+B<atduck pty:>I</tmp/modem>        (to create a PTY)
+
+The subsections below specify which transport methods are compatible with each emulator.
+On Windows, some emulators only support Windows Named Pipes; see L</WINDOWS NOTES> for more information.
+
+=for comment
+B<atduck \\.\pipe\>I<modem>        (to connect to a Win32 Named Pipe)
+
+=over
+
+=item QEMU [UNIX, TCP]
+
+To add a serial port in QEMU, use the B<-serial> option:
+
+B<qemu> I<options> B<-serial unix:>I</tmp/modem>       (for a UNIX socket)
+
+B<qemu> I<options> B<-serial tcp:localhost:>I<5555>    (for a TCP socket)
+
+=for comment
+B<qemu> I<options> B<-serial pipe:>I<modem>            (for a Win32 Pipe)
+
+=item VMware [UNIX]
+
+Configure the serial port to B<Use socket (named pipe)> I</tmp/modem> from B<Client> to B<An Application>.
+
+=for comment
+On Windows, configure the serial port to B<Use socket (named pipe)> B<\\.\pipe\>I<modem> from B<Server> to B<An Application>. Then connect B<ATduck> to the Win32 Named Pipe.
+
+=item VirtualBox [UNIX]
+
+Configure the serial port to use the B<Host Pipe> I</tmp/modem> (do not select B<Create Pipe>).
+
+=item Bochs [TCP]
+
+In your F<bochsrc> file, configure B<com1> to use a TCP socket as follows:
+
+B<com1: enabled=1, mode=socket-server, dev=localhost:>I<5555>
+
+=item DOSBox [TCP]
+
+In your F<dosbox.conf> file, configure B<serial1> to use a TCP socket as follows:
+
+B<serial1=nullmodem transparent:1 server:localhost port:>I<5555>
+
+=item BasiliskII [PTY]
+
+Configure the Modem Port to use I</tmp/modem>.
+
+=back
+
+=head1 WINDOWS NOTES
+
+B<ATduck> has been tested on Cygwin. Please be aware of the following Cygwin-specific issues:
+
+=over
+
+=item *
+
+The Perl module IO::Pty is not available in Cygwin Setup, and must be compiled from source. The module can be downloaded from CPAN.
+
+=item *
+
+SLiRP does not compile due to a preprocessor definition conflict with Cygwin's libc.
+A patch against Debian's SLiRP 1.0.17-3 is included to resolve this issue.
+
+=back
+
+On Windows, UNIX sockets are not available and many emulators (including VMware and VirtualBox) use Windows Named Pipes instead. B<ATduck> supports Windows Named Pipes if the Perl modules Win32API::File and Win32::Event Perl are available. Install perl-libwin32 in Cygwin Setup.
+
+To use Windows Named Pipes with VMware, configure the serial port to B<Use socket (named pipe)> B<\\.\pipe\>I<modem> from B<Server> to B<An Application>.
+Other emulators may be configured similarly.
+After starting the emulator, start B<ATduck>:
+
+B<atduck \\.\pipe\>I<modem>
+
+=for comment
+It may also be possible to use "VMware Serial Line Gateway" (L<http://l4ka.org/91.php>) to bridge between TCP/IP and named pipes. (This is not the recommended approach).
+
+=head1 BUGS
+
+=over
+
+=item *
+
+SLiRP's PPP emulation works only if your computer's hostname does not resolve to a loopback address like 127.0.0.1 (e.g. from F</etc/hosts>).
+A patch against Debian's SLiRP 1.0.17-3 is included to resolve this issue.
+
+=item *
+
+DTR and flow control depends entirely on support from the emulator's virtual serial port. In general, this support is completely absent.
+
+=item *
+
+Should be able to attach to a serial port. Should be able to listen on Win32Pipe.
+
+=item *
+
+Should use new scheme for IDs.
+
+=item *
+
+Does not sound like a duck choking on a kazoo.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (C) 2007-2011 nandhp <nandhp@gmail.com>
+
+License GPLv2+: L<http://www.gnu.org/licenses/gpl-2.0.html>
+
+This is open-source software; you may redistribute and/or
+modify it subject to certain conditions; see license.
+There is NO WARRANTY, to the extent permitted by law.
+
+=head1 SEE ALSO
+
+L<qemu(1)>, L<virtualbox(1)>, L<bochs(1)>, L<dosbox(1)>, L<BasiliskII(1)>,
+L<tcpser(1)>, L<socat(1)>,
+L<slirp(1)>, L<getty(8)>, L<gkermit(1)>, L<sz(1)>, L<rz(1)>
+
+ITU-T Recommendation V.250, "Serial asynchronus automatic dialling and control." July 2003. L<http://www.itu.int/rec/T-REC-V.250/en>
+
+U.S. Patent 4,549,302, "Modem with improved escape sequence mechanism to prevent escape in response to random occurrence of escape character in transmitted data." October 1985. L<http://www.google.com/patents/about?id=BFAyAAAAEBAJ>
+
+=cut
+

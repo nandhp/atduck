@@ -1,0 +1,1214 @@
+#!/usr/bin/perl
+#
+# ATduck - Hayes AT-compatible modem emulator
+# Copyright (C) 2007-2011 nandhp <nandhp@gmail.com>
+#
+#    This program is free software; you can redistribute it and/or
+#    modify it under the terms of the GNU General Public License as
+#    published by the Free Software Foundation; either version 2 of
+#    the License, or (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+#
+
+use IO::Select;
+use IO::Socket;
+use IPC::Open2;
+use IO::Pty;
+use POSIX qw(:errno_h :sys_wait_h);
+use Getopt::Long;
+use Pod::Usage;
+use Time::HiRes qw/time/;
+use threads; # For Win32Pipes
+use threads::shared;
+use warnings;
+use strict;
+our $| = 1;
+
+# Load program identification
+my $VERSION = 20110207;
+my ($progname,$tagline,$copyright,$license) = (undef,undef,undef);
+{
+    my $oldpos = tell(DATA);
+    seek(DATA,0,0);                         # Jump to the top of the file
+    while (<DATA>) {
+        last if m/^[^#]/;
+        my ($text) = m/^#  +(.+)\s*$/;
+        if ( !$text && !defined($license) ) {
+            ($progname,$tagline) = ($1,$2) if m/^# (.+?) - (.+)\s*$/;
+            $copyright = $1 if m/^# Copyright \([Cc]\) (.+)\s*$/;
+            next;
+        }
+        $license .= ($text||'')."\n";
+    }
+    $license =~ s/\s*$//;                   # Remove trailing newlines
+    seek(DATA,$oldpos, 0);                  # Return to the DATA section
+}
+
+# Constants
+my $rate = 115200;
+my $ring_cadence = 6;
+my $modemidbase = 1;
+
+my %responses = ( OK => 0, CONNECT => 1, RING => 2, 'NO CARRIER' => 3,
+                  ERROR => 4, 'NO DIALTONE' => 6, BUSY => 7,
+                  'NO ANSWER' => 8 );
+
+my @info = (127001,                             # I0 Numeric identification
+            0,                                  # I1 Display checksum
+            '',                                 # I2 Verify checksum
+            "$progname $VERSION",               # I3 Firmware revision
+            "$progname version $VERSION\r\n".   # I4 OEM string
+            "Copyright (C) $copyright\r\n".
+            "License GPLv2+: http://www.gnu.org/licenses/gpl-2.0.html\r\n".
+            "This is open-source software; you may redistribute and/or\r\n".
+            "modify it subject to certain conditions; see license.\r\n".
+            "There is NO WARRANTY, to the extent permitted by law.",
+           );
+
+# http://docs.kde.org/stable/en/kdenetwork/kppp/hayes-sregisters.html
+my @defreg = (0,        # S0  Answer on ring number. Don't answer if 0
+              0,        # S1  Count of incoming rings.
+              43,       # S2  Escape to command mode char (43='+',>127=None)
+              ord("\r"),# S3  Carriage return character (13="\r")
+              ord("\n"),# S4  Line feed character (10="\n")
+              8,        # S5  Backspace character
+              0,        # S6  Dial tone wait time (default 2-255 sec)
+              0,        # S7  Carrier wait time (default 1-255 sec)
+              0,        # S8  Comma pause time (default 2)
+              0,        # S9  Carrier detect time (1-255 1/10ths second)
+              0,        # S10 Time from carrier loss to hangup (1/10ths sec.)
+              0,        # S11 Pulse dial tone length (50-255 milliseconds)
+              50,       # S12 Guard time for +++ (0-255 1/50th seconds)
+             );
+
+# Load phonebook
+my @phonebook = ();
+while (<DATA>) {
+    next if m/^(;|#|$)/;
+    if ( m/^\s*(?:\[(.+)\]|\<(.+)\>)\s*(.*?)\s*$/ ) {
+        my $mode = $1 ? 'prefix' : 'suffix';
+        my ($pattern, $params) = ($1||$2, $3);
+        if ( $mode eq 'suffix' ) { # Convert suffix-glob to regexp [FIXME]
+            $pattern =~ s/[^0-9?]//g;
+            $pattern =~ s/(\?+)/'('.('.' x length($1)).')'/ge;
+        }
+        my $h = { match => $pattern, matchmode => $mode, data => '' };
+        while ( $params =~ m/\s*([a-zA-Z0-9_]+)(=(\S*))?/g )
+            { $h->{$1} = $2 ? $3 : 1 }
+        push @phonebook, $h;
+    }
+    else { $phonebook[-1]{data} .= $_ }
+}
+# Sort the phonebook so that prefixes come before suffixes
+# and longer matches come before shorter ones.
+@phonebook = sort { ($a->{matchmode} cmp $b->{matchmode}) ||
+                    (length($b->{match}) <=> length($a->{match})) } @phonebook;
+
+# Options
+my $debug = 0;
+
+# Subprocess and event handling
+$SIG{CHLD} = \&child_hangup;
+$SIG{INT} = \&quit;
+my $zombies = 0;          # Zombie indicator
+my @pendingrings = ();    # Modems that are receiving calls
+my @pendingsuspends = (); # Modems checking final guard time before suspend
+my $nextevent = 0;        # Time of next event to interrupt select
+my @pendingpipes = ();    # Modems attached to closed Win32Pipes
+share(@pendingpipes);
+
+# Socket handling
+my @modems = ();
+my @listeners = ();
+my $select = IO::Select->new();
+my $streamprintprefix = '';
+my @listenargs = ();
+
+# Parse command-line options
+GetOptions("listen=s" => sub { push @listenargs, $_[1] },
+           "debug|verbose|D" => \$debug,
+           "help|?" => \&usage,
+           "version" => \&version) or usage();
+
+# Create listener sockets
+add_listener($_) foreach @listenargs;
+undef @listenargs;
+
+# Open "serial line"
+foreach my $str ( @ARGV ) {
+    # Serial line
+    print "Opening serial line...\n";
+    my $l = parse_address($str);
+    my $type = $l->{type};
+    if ( $type eq 'tcp4' ) {
+        $l->{r} = $l->{w} = IO::Socket::INET->new
+            (PeerAddr => $l->{host}, PeerPort => $l->{port});
+    }
+    elsif ( $type eq 'open' ) { # Not well tested
+        open $l->{w}, '+<', $l->{file} or ($l->{w} = undef);
+        $l->{r} = $l->{w};
+    }
+    elsif ( $type eq 'pty' ) {
+        $l->{r} = $l->{w} = new IO::Pty;
+        my $fn = $l->{r}->ttyname();
+        print "Allocated terminal: $fn\n";
+        if ( $l->{file} ) {
+            unlink $l->{file} if -e $l->{file} and -l $l->{file};
+            symlink $l->{r}->ttyname(), $l->{file}
+                or die "Couldn't create pty symlink: $!\n";
+        }
+    }
+    elsif ( $type eq 'unix' ) {
+        $l->{r} = $l->{w} = IO::Socket::UNIX->new(Peer => $l->{file});
+    }
+    elsif ( $type eq 'win32pipe' ) {
+        Win32PipeOpen($l);
+    }
+    else {
+        die "Invalid or unsupported address type $type\n";
+    }
+    die "Could not connect to $str as $type: $!\n" unless $l->{r} and $l->{w};
+    init_modem($l);
+}
+
+usage() unless @modems || @listeners;
+
+while ( @modems || @listeners ) {
+    # Require at least a quarter-second timeout, to prevent malfunctioning
+    # timeouts from causing severe problems.
+    if ( $nextevent > 0 )
+        { $nextevent -= time; $nextevent = .25 if $nextevent < .25 }
+SOCKET:
+    foreach my $sock ( $select->can_read($nextevent||undef) ) {
+        my $buf = '';
+        # Modem for which socket is the serial port, carrierread.
+        my ($m, $mc) = (undef, undef);
+        # Interrupt the loop if there are Win32Pipes waiting to be closed.
+        last if @pendingpipes; # Read only, just counting, shouldn't need lock
+        # Find out which modem we are reading from
+        foreach ( @modems ) {
+            $m = $_ if $sock eq $_->{serial}->{r};
+            $mc = $_ if $_->{carrier} and ($sock eq $_->{carrier}->{r});
+        }
+        if ( !$m && !$mc ) { # Must be a listener socket
+            my $found = 0;
+            foreach ( @listeners ) {
+                if ( $sock eq $_->{sock} ) {
+                    my $client = { type => 'client' };
+                    $client->{r} = $client->{w} = $_->{sock}->accept();
+                    init_modem($client);
+                    $found = 1;
+                    last;
+                }
+            }
+            next if $found;
+            die "Select event on unidentified socket";
+        }
+
+        # Read from socket, then dispatch appropriately
+        my $rc = sysread($sock, $buf, 512);
+        # VM hangup
+        if ( $m && !$rc ) {
+            delete_modem($m);
+            next;
+        }
+        # Reading from serial port in data mode
+        elsif ( $m && $m->{carrier} && !$m->{suspended} ) {
+            # Check for escape sequence and write to modem's carrierwrite
+            my $now = time; my $plus;
+            if ( ($m->{reg}[2] <= 127) and      # > 127 denotes Escape disabled
+                 ($plus = quotemeta chr $m->{reg}[2]) and
+                 ($buf =~ m/^(.*?)((?:$plus){1,3})(.*?)$/) and
+                 (!$m->{reg}[12] or (!$1 and !$3)) ) {
+                my ($prefix, $pluscount, $suffix) = ($1, length($2), $3);
+                my $GT = $m->{reg}[12]/50.0;
+
+                # Test with:    foo+++ATH    +++ATH    +++
+
+                if ( ( $m->{reg}[12] and $m->{readplus} and
+                       ($now >= $m->{plustime}+$GT) ) or
+                     ( !$m->{readplus} and ($now >= $m->{readtime}+$GT) ) )
+                    # If last had a plus, reset if guard time exceeded since.
+                    # Else, ensure guard time exceeded since last read.
+                    { $m->{readplus}  = $pluscount }
+                elsif ( $m->{readplus} ) # Another plus soon after the last
+                    { $m->{readplus} += $pluscount }
+                if ( $m->{readplus} ) {
+                    info($m, "Plus    $m->{readplus} at $now");
+                    $m->{plustime} = $now;
+                }
+
+                # Suspend after guard time elapses
+                push @pendingsuspends, $m if $m->{readplus} >= 3;
+            }
+            else {
+                $m->{readplus} = $m->{plustime} = 0;
+                printstream($m, 0, 0, $buf);
+            }
+            $m->{readtime} = $now;
+
+            # Write to carrier, unless it's a suspended modem
+            syswrite($m->{carrier}->{w}, $buf)
+                unless exists($m->{carrier}{modem}) and
+                       $m->{carrier}{modem}{suspended};
+        }
+        # Reading from serial port in command mode
+        elsif ( $m ) {
+            # Handle command
+            syswrite($m->{serial}{w},$buf) if $m->{echo};
+            $m->{templine} .= $buf;
+            printstream($m, 0, 1, $buf);
+            # Cancel in progress dialing
+            if ( $m->{carrier} and $m->{ringing} < 0 ) {
+                modemreply($m, 'NO CARRIER'); hangup($m)
+            }
+            # Backspace
+            my $bs = quotemeta(chr($m->{reg}[5]));
+            1 while $m->{templine} =~ s/(?:^|.)$bs//;
+            # Parse for A/ or ATcommand
+            my $le = quotemeta(chr($m->{reg}[3]).chr($m->{reg}[4]));
+            while ( $m->{templine} =~ s/^.*?(?:A\/|(AT.*?)\s*[$le]+)//si ) {
+                $m->{lastline} = $1 if defined($1); # AT command
+                printprefix('');
+                modemrequest($m, $m->{lastline});
+            }
+            # Test with: ATI4    A/ATI3 foo\nbar\nA/foobar\n
+
+            # Remove all remaining complete lines, since they don't have AT
+            # on them.
+            $m->{templine} =~ s/^.+[$le]+//sg;
+        }
+        # Reading from (nonmodem) carrier, DISCARD IF MODEM SUSPENDED!
+        elsif ( $mc && !$mc->{suspended} ) {
+            # Write to serial
+            if ( !defined($rc) ) {
+                next if $! == EAGAIN;
+                #print "$!\n";
+            } elsif( $rc == 0 ) {
+                modemreply($mc, 'NO CARRIER');
+                hangup($mc);
+                next;
+            }
+            else {
+                printstream($mc, 1, 0, $buf);
+                syswrite($mc->{serial}{w},$buf);
+            }
+        }
+    }
+
+    # Process background events
+    reap_zombies() if $zombies;
+    $nextevent = 0;
+    ring_modems() if @pendingrings;        # Ring for incoming calls
+    check_guardtime() if @pendingsuspends; # Check for guard time after "+++"
+    Win32PipeCleanup() if @pendingpipes;   # Delete modems on closed Win32Pipes
+}
+
+# Modem command handler
+sub modemrequest {
+    my ($m, $line) = @_;
+    my $result = 'OK';
+    $line =~ s/^AT//i;
+
+    while ( $line ) {
+        $line =~ s/^\s*//g; # For NT3 RAS
+        # Reset
+        if ( $line =~ s/^(Z\d*|&F\d*)//i ) {
+            hangup($m);
+            reset_modem($m);
+        }
+        # The following commands affect the physical serial, telephone line,
+        # or conversation in ways that cannot be implemented.
+        elsif ( $line =~ s/^&C[01]?//i ) { } # Carrier Detect
+        elsif ( $line =~ s/^&D[0123]?//i ) { } # Data Terminal Ready
+        elsif ( $line =~ s/^&K[0123456]?//i ) { } # Flow control
+        elsif ( $line =~ s/^\\Q[0123]?//i ) { } # Flow control
+        elsif ( $line =~ s/^B[012]?//i ) { } # Bell mode (Most modems ignore)
+        elsif ( $line =~ s/^L[0123]?//i ) { } # Speaker Loudness
+        elsif ( $line =~ s/^M[0123]?//i ) { } # Speaker on/off
+        elsif ( $line =~ s/^N[01]?//i ) { } # Require handshake speed S37
+        elsif ( $line =~ s/^[PT]//i ) { } # Default to tone/pulse dialing
+
+        # The following commands control the conversation
+        elsif ( $line =~ s/^A//i ) { # Answer incoming call
+            if ( $m->{carrier} and $m->{ringing} <= 0 ) # Online call
+                { $result = 'ERROR'; last }
+            else { $result = answer($m); last }
+        }
+        elsif ( $line =~ s/^D(.*?)(;|$)//i ) {
+            my ($str,$online) = (uc $1, $2?0:1);
+            # If ; is specified, do not to go online after dialing and
+            # remain in commmand mode until ATO or ATA.
+            # This isn't supported because we'd have to save the rest of the
+            # command line and execute it after answering...
+            if ( $m->{carrier} || !$online ) { $result = 'ERROR'; last }
+            else {
+                hangup($m);
+                info($m, "Dialing $str");
+                $result = dial($m, dialplan($m, $str));
+                # Clean up any leftover carrier data
+                if ( $m->{carrier} and $result !~ m/^CONNECT|^OK|^$/ ) {
+                    hangup($m)
+                }
+                elsif ( !$online ) {
+                    # We connected, so suspend and return OK instead of CONNECT
+                    if ( $result ) { $result = 'OK'; $m->{suspended} = 1 }
+                    # We haven't connected, so ringing should be -1.
+                    # Set it to -2 so we don't connect when answered
+                    else { $m->{ringing} = -2 }
+                }
+            }
+            last;
+        }
+        elsif ( $line =~ s/^H([0]?)//i ) {
+            my $arg = ($1||0)+0;
+            if ( $arg && $m->{carrier} ) { $result = 'ERROR'; last }
+            elsif ( $arg ) { $result = 'NO CARRIER'; last }
+            else { hangup($m) }
+        }
+        elsif ( $line =~ s/^O([01]?)//i ) { # Go online
+            if ( $m->{suspended} && $m->{carrier} && !$m->{ringing} ) {
+                $result = 'CONNECT '.$rate;
+                $m->{suspended} = 0;
+            }
+            else { $result = 'NO CARRIER'; last }
+        }
+
+        # The following commands set options
+        elsif ( $line =~ s/^W[012]?//i ) { } # FIXME Negotiation progress msgs
+        elsif ( $line =~ s/^X([01234]?)//i ) { # Call progress information
+            # 0: "CONNECT" 1: "CONNECT text"
+            # 2: "CONNECT text"+dialtone detection
+            # 3: "CONNECT text"+busy detection
+            # 4: "CONNECT text"+dialtone and busy detection
+            $m->{smartmodem} = length($1)?($1+0):0;
+        }
+        elsif ( $line =~ s/^E([01]?)//i ) { $m->{echo} = ($1||0)+0 } # Echo
+        elsif ( $line =~ s/^Q([01])//i ) { $m->{quiet} = $1+0 } # Quiet
+        elsif ( $line =~ s/^V([01]?)//i ) { $m->{verbose} = ($1||0)+0 } # Verbose
+        elsif ( $line =~ s/^S(\d+)\?//i )
+            { $result = ($m->{reg}[$1+0]||0)."\r\nOK" }
+        elsif ( $line =~ s/^S(\d+)=(\d+)//i ) { $m->{reg}[$1+0]=$2+0 }
+
+        # The following commands retrieve identifying information
+        elsif ( $line =~ s/^I(\d*)//i ) {
+            my $idx = ($1||0)+0;
+            if ( ($idx < @info) && length($info[$idx])>0 )
+              { $result = $info[$idx]."\r\nOK" }
+            else { $result = 'OK' }
+        }
+
+        # V.250 and ATduck extended command formats
+        elsif ( $line =~ s/^([+@#])([-:\/._%!0-9A-Z]+)(\?|="([^"]+)"|=([^;"]*))?(;|$)//i ) {
+            my ($command, $arg, $value) = ($1.uc($2), $3||'', $4||$5||'');
+            my ($help, $query) = ($arg eq '=?', $arg eq '?');
+            my $nval = $value =~ m/(\d+)/ ? $1+0 : 0;
+            # if ( $4 ) { ($value = $4) =~ s/\\([0-9A-F]{2})/chr hex $1/e }
+            # elsif ( $5 ) { $value = $5 }
+
+            if ( $command =~ m/^\+[FG]MI/ )     # +GMI Identify Manufacturer
+                { $result = "nandhp\r\nnandhp\@gmail.com\r\nOK" unless $help }
+            elsif ( $command =~ m/^\+[FG]MM/ )  # +GMM Identify Model
+                { $result = "$progname\r\nOK" unless $help }
+            elsif ( $command =~ m/^\+[FG]MR/ )  # +GMR Identify Revision
+                { $result = "$VERSION\r\nOK" unless $help }
+            elsif ( $command =~ m/^\+[FG]SN/ )  # +GSN Product Serial Number
+                { $result = "$m->{id}\r\nOK" unless $help }
+            elsif ( $command eq '+GCAP' )       # +GCAP Capabilities list
+                { $result = "+GCAP: +FCLASS\r\nOK" unless $help }
+            elsif ( $command eq '+VCID' or      # +VCID Automatic Caller ID
+                    $command eq '#CID' ) {
+                if ( $help ) { $result = "+VCID: (0,1,2)\r\nOK" }
+                elsif ( $query ) { $result = "$m->{sendcid}\r\nOK" }
+                elsif ( $nval >= 0 && $nval <= 2 ) { $m->{sendcid} = $nval }
+                else { $result = 'ERROR'; last }
+            }
+            elsif ( $command eq '+VRID' ) {     # +VRID Repeat Caller ID
+                if ( $help ) { $result = "(0,1)\r\nOK" }
+                elsif ( $nval >= 0 && $nval <= 1 ) {
+                    my $data = callerid_send($m, $nval);
+                    $result = $data.'OK' if $data;
+                }
+                else { $result = 'ERROR'; last }
+            }
+            elsif ( $command eq '+FCLASS' ) {   # +FCLASS
+                if ( $help ) { $result = "+FCLASS: 0\r\nOK" }
+                #if ( $help ) { $result = "+FCLASS: 0,1\r\nOK" }
+                elsif ( $query ) { $result = "$m->{faxclass}\r\nOK" }
+                #elsif ( $nval >= 0 && $nval <= 1 ) { $m->{faxclass} = $nval }
+                else { $result = 'ERROR'; last }
+            }
+            elsif ( $command =~ m/^\+F([TR][MH])$/ ) { # FIXME
+                # Not available unless faxing
+                if ( !$m->{faxclass} ) { $result = 'ERROR'; last }
+                elsif ( $help ) {
+                    $result = "3,24,48,72,73,74,96,97,98,121,122,145,146\r\nOK";
+                }
+                elsif ( $nval ) { $result = 'ERROR'; last } # FIXME
+                else { $result = 'ERROR'; last }
+                #elsif ( $nval == 3 ) { }
+                #else { $result = 'ERROR'; last }
+            }
+            #elsif ( $command eq '+FTS' or $command eq '+FRS' ) { }
+            else { $result = 'ERROR'; last }
+        }
+        else { $result = 'ERROR'; last }
+    }
+    modemreply($m, $result) if $result; # Certain ATD do not return immediately
+    return;
+}
+
+sub modemreply {
+    my ($m, $result) = @_;
+    if ( $m->{quiet} ) { # No response sent to modem, just print one
+        printtransaction($m, -1, "\r\n$result\r\n");
+        return;
+    }
+    # Table 3/V.250 – Effect of V parameter on response formats
+    #                       V0                 V1
+    # Information responses <text><cr><lf>     <cr><lf><text><cr><lf>
+    # Result codes          <numeric code><cr> <cr><lf><verbose code><cr><lf>
+    if ( $m->{verbose} ) {
+        $result =~ s/ +\d+$//g if !$m->{smartmodem}; # Remove connect speed
+        $result = "\r\n$result\r\n";
+    }
+    else { # Convert to numeric response
+        my ($text,$code) = $result =~ m/^((?:[\s\S]*\r\n)?)([^\r\n]+)$/;
+        $code =~ s/ +\d+$//g;
+        $result = $text.(exists($responses{$code})?$responses{$code}:99)."\r";
+    }
+    printtransaction($m, 1, $m->{verbose}?$result:"$result\n");
+    # Get values for \r and \n from registers.
+    $result =~ s/(\r|\n)/chr(($1 eq "\r")?$m->{reg}[3]:$m->{reg}[4])/eg;
+    syswrite($m->{serial}{w}, $result);
+}
+
+# Check that the guard time after the escape sequence has been satisfied.
+# If it has, suspend the carrier.
+sub check_guardtime {
+    my $now = time;
+    for ( my $i = 0; $i < @pendingsuspends; $i++ ) {
+        my $m = $pendingsuspends[$i];
+        # Figure out our deadline
+        my $endtime = $m->{plustime}+$m->{reg}[12]/50.0;
+        if ( ($endtime <= $now) or ($m->{readplus} < 3) ) {
+            if ( ($m->{readtime} <= $m->{plustime}) and
+                 ($m->{readplus} >= 3) ) {
+                $m->{suspended} = 1;
+                $m->{readplus} = 0;
+                $m->{plustime} = 0;
+                info($m, 'Suspended at '.$now);
+                modemreply($m,'OK');
+            }
+            else { info($m, 'Canceling suspend') }
+            # Remove and iterate
+            splice @pendingsuspends, $i, 1;
+            redo unless $i >= $#pendingsuspends;
+        }
+        elsif ( !$nextevent or ($nextevent > $endtime) )
+            { $nextevent = $endtime }
+    }
+}
+
+# Close all sockets on exit
+sub quit {
+    while ( my $l = shift @listeners ) {
+        close $l->{sock};
+        # Clean up our UNIX sockets from the filesystem
+        unlink $l->{file} if exists($l->{file}) and $l->{file} and
+                             ($l->{type} eq 'unix') and -S $l->{file};
+    }
+    while ( my $m = shift @modems ) {
+        modemreply($m, 'NO CARRIER') if $m->{carrier} && !$m->{suspended};
+        delete_modem($m, 1);
+    }
+    print "\n";
+}
+sub child_hangup { $zombies++ }
+sub reap_zombies {
+    $zombies = 0;
+    while ( (my $pid = waitpid(-1, WNOHANG)) != -1 ) {
+        foreach my $m ( @modems ) {
+            if ( $m->{carrier} && exists($m->{carrier}->{pid}) &&
+                 ( $pid == $m->{carrier}->{pid} ) ) {
+                modemreply($m, 'NO CARRIER') unless $m->{suspended};
+                hangup($m);
+            }
+        }
+    }
+}
+
+sub hangup {
+    my ($m) = @_;
+    local $SIG{CHLD} = 'IGNORE';
+    if ( defined(my $c = $m->{carrier}) ) {
+        info($m, 'Hanging up') if $m->{carrier};
+        # Close all opened filehandles
+        foreach ( 'readpipe', 'writepipe', 'pty' ) {
+            next unless exists($c->{$_}) and $c->{$_};
+            $select->remove($c->{$_}) if $select->exists($c->{$_});
+            close $c->{$_};
+        }
+        # End carrier process
+        if ( exists($c->{pid}) and (($c->{pid}||0) > 1) ) {
+            kill $_, $c->{pid} foreach 'SIGHUP', 'SIGINT';
+            waitpid $c->{pid}, 0; # FIXME: What if this takes a long time?
+        }
+        $m->{carrier} = undef;
+        # Disconnect other modem
+        if ( exists($c->{modem}) and $c->{modem} and
+             defined($c->{modem}{carrier}) ) {
+            modemreply($c->{modem}, 'NO CARRIER')
+                if !$c->{modem}->{suspended} and ($c->{modem}->{ringing} >= 0);
+            hangup($c->{modem});
+        }
+    }
+    stopringing($m) if $m->{ringing} > 0;
+    $m->{ringing} = 0;
+    $m->{suspended} = 0;
+    $m->{ringtime} = 0;
+}
+sub stopringing {
+    my ($m) = @_;
+    # Remove from @pendingrings
+    for ( my $i = 0; $i < @pendingrings; $i++ ) {
+        if ( $pendingrings[$i]{id} eq $m->{id} ) {
+            splice @pendingrings, $i, 1;
+            redo unless $i >= $#pendingrings;
+        }
+    }
+    info($m, "Stopping ringer");
+    $m->{reg}[1] = 0; # Reset ring counter
+}
+
+# Send periodic RINGs to each modems receiving a call
+sub ring_modems {
+    my $now = time;
+    for ( my $i = 0; $i < @pendingrings; $i++ ) {
+        my $m = $pendingrings[$i];
+        die "Tryied to ring an online modem" unless $m->{ringing} > 0;
+        if ( $now >= $m->{ringtime}+$ring_cadence ) {
+            modemreply($m, 'RING');
+            $m->{ringtime} = $now;
+            $m->{reg}[1]++; # S1: Ring counter
+            modemreply($m, callerid_send($m, $m->{sendcid}-1).'')
+                if $m->{reg}[1] == 1 && $m->{sendcid}; # Caller ID
+            if ( $m->{reg}[0] && ($m->{reg}[1] >= $m->{reg}[0]) ) {
+                # Autoanswer
+                modemreply($m,answer($m));
+                redo unless $i >= $#pendingrings;
+            }
+        }
+        # Figure out when we next want to ring
+        my $mynextring = $m->{ringtime}+$ring_cadence;
+        if ( !$nextevent or ($nextevent > $mynextring) )
+            { $nextevent = $mynextring }
+    }
+}
+
+# Set up a PTY for the carrier, if needed
+sub getcarrierpty {
+    my ($m, $flag) = @_;
+    if ( !$m->{carrier}{pty} ) {
+        $m->{carrier}{pty} = new IO::Pty;
+        info($m, 'Allocated Terminal: '.$m->{carrier}{pty}->ttyname());
+    }
+    return unless $flag;
+    my $fn = $m->{carrier}{pty}->ttyname();
+    $fn =~ s/^\/dev\/// if $flag eq 'name';
+    return $fn;
+}
+
+# Generate SDMF or MDMF Caller ID message
+sub callerid_pack {
+    my ($mdmf, $info) = @_;
+    # SDMF/MDMF Overview (More details in ETSI 659 "Subscriber line protocol
+    #   over the local loop for display (and related) services", 2001-2004)
+    #
+    # SDMF format (Plain Caller ID):
+    #   04XX      Denotes SDMF format and length of message (char, not ASCII)
+    #     MMMMDDDDHHHHMMMM
+    #             Month, day, hour, minute (8 bytes: Two ASCII digits each)
+    #     NN...   Phone number, or 'O' = Out of area, 'P' = Private caller
+    #   CC        Checksum
+    #
+    # MDMF format (Caller ID with Name):
+    #   80XX      Denotes MDMF format and length of message (char, not ASCII)
+    #     TTLL    Data segment type and length (char, not ASCII)
+    #     XX...   Data segment data
+    #     ...     Additional data segments
+    #   CC        Checksum
+    #
+    # MDMF data types:
+    #   01        Date and time, encoded as in SDMF
+    #   02        Phone number
+    #   04        Number unavailable: 'O' = Out of area, 'P' = Private caller
+    #   07        Name
+    #   08        Name unavailable:   'O' = Out of area, 'P' = Private caller
+    #
+    # Checksum format: twos complement of the mod-256 sum of data
+    my $data = '';
+    my ($date,$time) = callerid_datetime($info);
+    my ($number, $name) = dialplan_reverse($info);
+    if ( $mdmf ) {
+        $data .= chr(1).chr(8).$date.$time;
+        if ( !$number or $number eq 'O' or $number eq 'P' )
+            { $data .= chr(4).chr(1).$number } # Phone number unavailable
+        else { $data .= chr(2).chr(length($number)).($number||'O') }
+        if ( !$name or $name eq 'O' or $name eq 'P' )
+            { $data .= chr(8).chr(1).$name } # Name unavailable
+        else { $data .= chr(7).chr(length($name)).($name||'O') }
+    }
+    else { $data .= $date.$time.($number||'O') } # SDMF
+    $data = chr($mdmf?0x80:0x04).chr(length($data)).$data;
+    my $datastr = '';
+    my $cksum = 0;
+    for ( my $i = 0; $i < length($data); $i++ ) {
+        my $c = ord(substr($data, $i, 1));
+        $cksum += $c;
+        $datastr .= sprintf("%x", $c);
+    }
+    return $datastr.sprintf("%02x",(-($cksum%256))&0xff);
+}
+sub callerid_datetime { # Return the current time, formatted for Caller ID
+    my ($info) = @_;
+    my ($sec,$min,$hr,$day,$mon) = localtime($info->{starttime}||time);
+    return (sprintf("%02d%02d", $mon+1, $day), sprintf("%02d%02d", $hr, $min));
+}
+sub callerid_send { # Format Caller ID for sending
+    my ($m, $raw) = @_;
+    if ( $m->{carrier} ) {
+        if ( $raw ) { return 'MESG='.callerid_pack(1,$m->{carrier})."\r\n" }
+        my ($date,$time) = callerid_datetime($m->{carrier});
+        my ($number, $name) = dialplan_reverse($m->{carrier});
+        return "DATE=$date\r\nTIME=$time\r\nNMBR=".($number||'O')."\r\nNAME=".
+               ($name||'O')."\r\n";
+    }
+    return '';
+}
+
+# Parse number based on dialing plan
+sub dialplan {
+    my ($m, $str) = @_;
+    (my $filtered = $str) =~ s/\D//g;
+
+    # Check phonebook
+    foreach my $c ( @phonebook ) {
+        next unless exists($c->{match});
+        # Prefix match (for special handling of the entire dialing string)
+        if ( ($c->{matchmode} eq 'prefix') and
+             ($str =~ m/^([^0-9A-D]*)$c->{match}(.+)$/) ) {
+            #(my $prefix,$input) = ($1,$2);
+            #$input =~ s/^[\s,W]*/$prefix/; # Remove leading wait characters
+            return { %{$c}, input => $1.$2 }; # Duplicate
+        }
+        # Suffix match (for simple dispatch using phonebook entries)
+        elsif( ($c->{matchmode} eq 'suffix') and
+               ($filtered =~ m/($c->{match})$/) ) {
+            return { %{$c}, input => ($2||$1) }; # Duplicate
+        }
+    }
+    return undef;
+}
+sub dialplan_reverse {
+    my ($c) = @_;
+    my ($name,$number) = ('O','O');
+    my $str;
+    if ( $c->{type} eq 'id' ) {
+        $str = $c->{modem}{id} if $c->{modem};
+    }
+    if ( $str ) {
+        foreach my $e ( @phonebook ) {
+            next unless exists($e->{match}) and ($e->{type}||'') eq $c->{type};
+            my $match = $e->{match};
+            if ( $e->{matchmode} eq 'prefix' ) {
+                $match =~ s/\D//g;
+                $number = $match.$str;
+            }
+            elsif ( $e->{matchmode} eq 'suffix' ) {
+                $match =~ s/\((\.+)\)/sprintf('%0'.length($1).'d', $str)/e;
+                $number = $match;
+            }
+        }
+    }
+    # FIXME: Consider looking for aliases
+    return wantarray ? ($number,$name) : $number;
+}
+
+# Establish carrier
+sub dial {
+    my ($m, $c, $recurse) = @_;
+    $recurse = 10 unless defined($recurse);
+    return 'NO ANSWER' unless $c;
+    $m->{carrier} = $c;  # Template already duplicated, use as carrier object
+    # No Caller ID for outgoing calls
+    $c->{NAME} = $c->{NMBR} = 'O'; $c->{starttime} = time;
+
+    info($m, 'Using phonebook entry '.$c->{match}.' mode='.$c->{type});
+
+    if ( $c->{type} eq 'alias' ) { # Alias to another phone number
+        return 'ERROR' if $recurse < 0; # Phonebook error
+        return dial($m, dialplan($m, $c->{target}), $recurse-1);
+    }
+    elsif ( $c->{type} eq 'extmodem' ) { # Forward to physical modem
+        return 'NO DIALTONE'; # Unimplemented
+    }
+    elsif ( $c->{type} eq 'telnet' ) { # Parse as IP+Port, use Telnet
+        return 'NO DIALTONE'; # Unimplemented
+    }
+    elsif ( $c->{type} eq 'id' ) { # Modem-to-modem
+        $c->{id} = $c->{input}+0;
+        my $cm = undef;
+        info($m, 'Looking for modem '.$c->{id});
+        foreach ( @modems ) { if ( $_->{id} == $c->{id} ) { $cm = $_; last } }
+        return 'NO ANSWER' unless $cm;
+        return 'BUSY' if $cm->{carrier}; # Implement Call Waiting here
+
+        info($m, 'Ringing modem '.$c->{id});
+        $c->{modem} = $cm;
+        $c->{r} = $cm->{serial}{r};
+        $c->{w} = $cm->{serial}{w};
+        $cm->{carrier} = { type => $c->{type}, modem => $m, id => $m->{id},
+                           r => $m->{serial}{r}, w => $m->{serial}{w},
+                           starttime => time,
+                         };
+        # Carrier modem is waiting for ATA
+        $cm->{ringing} = $cm->{suspended} = 1; $cm->{ringtime} = 0;
+        push @pendingrings, $cm;
+        # Caller modem is waiting for carrier to pick up
+        $m->{suspended} = 1; $m->{ringing} = -1;
+        return ''; # Don't do post-connect configuration. Don't return status.
+    }
+    elsif ( $c->{type} eq 'shell' ) { # Start a subprocess
+        # Set up subprocess environment
+        getcarrierpty($m) if $c->{usepty};
+        local $ENV{M_RATE} = $rate;
+        local $ENV{SLIRP_TTY} = local $ENV{M_TTYPATH} =
+            getcarrierpty($m,'path') if $c->{pty};
+        local $ENV{M_TTYNAME} = getcarrierpty($m,'name') if $c->{pty};
+        local $ENV{TERM} = 'vt100';
+        $c->{pid} = open2($c->{readpipe}, $c->{writepipe},
+                          'sh', '-c', $c->{data});
+        # Check that open2 succeeded
+        return 'NO CARRIER' unless $c->{pid};
+        # Set up filehandles
+        if ( $c->{pty} ) { $c->{r} = $c->{w} = $c->{pty} }
+        else { $c->{r} = $c->{readpipe}; $c->{w} = $c->{writepipe} }
+    }
+    else { return 'NO DIALTONE' } # Unknown carrier type
+
+    return 'NO CARRIER' unless $c->{r} and $c->{w};
+
+    # Set up sockets/filehandles (Except modem-to-modem)
+    my $origfh = select;
+    for my $fh ( $c->{r}, $c->{w} ) {
+        # FIXME: Is this needed? Presumably not for modem-to-modem?
+        # my $flags = fcntl($fh, F_GETFL, 0) or warn "Couldn't get flags: $!";
+        # $flags |= O_NONBLOCK;
+        # fcntl($fh, F_SETFL, $flags) or warn "Couldn't set flags: $!";
+        select($fh); $| = 1;
+    }
+    select($origfh);
+
+    $m->{suspended} = 0;
+    $select->add($c->{r});
+
+    return 'CONNECT '.$rate;
+}
+
+# Answer an incoming call
+sub answer {
+    my ($m) = @_;
+    return 'NO CARRIER' unless $m->{ringing} > 0 and $m->{carrier};
+    my $reply = 'CONNECT '.$rate;
+    $m->{suspended} = $m->{ringing} = 0;
+    # If modem-to-modem connect remote end
+    if ( my $cm = $m->{carrier}{modem} ) {
+        if ( $cm->{ringing} == -2 ) {
+            $cm->{suspended} = 1;
+            # FIXME: Process remaining command line in ATD...;BLAH
+            modemreply($cm, 'OK');
+        }
+        else {
+            $cm->{suspended} = 0;
+            modemreply($cm, $reply);
+        }
+        $cm->{ringing} = 0;
+    }
+    stopringing($m);
+    return $reply;
+}
+
+# Parse a transport address from the command-line. FIXME, needs rewriting
+sub parse_address {
+    my ($str) = @_;
+    my $a = { };
+    $str =~ s/^([a-z]+[46]?)(:(?!\d+$)|$)//i;
+    my $type = $1?lc($1):'';
+    # Aliases
+    $type = 'tcp4' if $type eq 'tcp';
+
+    if ( (!$type or $type eq 'tcp4') and $str =~ m/^(?:([^\\\/:]*):)?(\d+)$/ ) {
+        $a->{type} = 'tcp4';
+        $a->{host} = $1||'localhost';
+        $a->{port} = $2+0;
+    }
+    elsif ( $type eq 'pty' ) {
+        $a->{type} = 'pty';
+        $a->{file} = $str; # linkfn
+    }
+    elsif ( (!$type or $type eq 'open' or $type eq 'unix') ) {
+        # Let's assume that it's a file. What can we find out about it?
+        $a->{file} = $str;
+        if ( $type ) { $a->{type} = $type }
+        # Autodetect type (Win32Pipe, UNIX socket, or other)
+        elsif ( $str =~ m/^\\\\.\\pipe\\/ ) { $a->{type} = 'win32pipe' }
+        elsif ( !-e $str or -S $str ) { $a->{type} = 'unix' }
+        else { $a->{type} = 'open' } # Named pipe, serial port, ...
+    }
+    if ( !$a->{type} ) { $a->{type} = $type }
+    return $a;
+}
+
+# Create a listener socket
+sub add_listener {
+    my ($str) = @_;
+    my $l = parse_address($str);
+    my $type = $l->{type};
+    my $sock;
+    if ( $l->{type} eq 'tcp4' ) {
+        $sock = IO::Socket::INET->new
+            (LocalAddr => $l->{host}, LocalPort => $l->{port},
+             Listen => 5, Reuse => 1);
+    }
+    elsif ( $type eq 'pty' or $type eq 'open' )
+        { die "$type mode cannot be used with listen. Try without.\n" }
+    elsif ( $type eq 'win32pipe' )
+        { die "$type cannot be listened on yet (FIXME).\n" }
+    elsif ( $type eq 'unix' ) {
+        $sock = IO::Socket::UNIX->new(Local => $l->{file}, Listen => 5);
+    }
+    else {
+        die "Invalid or unsupported address type $type.\n";
+    }
+    die "Could not listen on $str as $type: $!\n" unless $sock;
+    $l->{sock} = $sock;
+    $l->{id} = 0;
+    info($l, "Listening on $str");
+    push @listeners, $l;
+    $select->add($sock);
+}
+
+# Create a modem object and add it to the modem list
+sub init_modem {
+    my $m = {serial => shift @_, id => 0, # Serial line
+             echo => 0, quiet => 0, verbose => 0, smartmodem => 0,
+             sendcid => 0, faxclass => 0, # Config
+             reg => [], # Modem registers
+             carrier => undef, suspended => 0, # Modem mode
+             ringing => 0, ringtime => 0, # Incoming calls
+             readtime => 0, readplus => 0, plustime => 0, # Modem escape
+             templine => '', lastline => 'AT',
+            };
+    $m->{id} = $modemidbase;
+    foreach ( @modems ) {
+        $m->{id}++ if $_->{id} == $m->{id};
+    }
+    # Insert the modem into the list
+    { my $orig = select($m->{serial}{r}); $|=1; select($orig) }
+    $select->add($m->{serial}{r});
+    push @modems, $m;
+    info($m, 'Modem created');
+    reset_modem($m);
+    return $m;
+}
+
+# Open a Win32 Named Pipe
+sub Win32PipeOpen {
+    my ($l) = @_;
+    foreach ( qw/Win32API::File Win32::Event/ ) {
+        die(($@||$!)."\nWin32Pipe: Can't load $_")
+            unless eval "use $_; 1";
+    }
+    # Open the named pipe
+    $l->{pipe} = Win32API::File::createFile
+        ($l->{file}, 'rwe', {Flags => Win32API::File::FILE_FLAG_OVERLAPPED()})
+            or die 'Win32Pipe: CreateFile: ' .
+                Win32API::File::fileLastError() . "\n";
+    # Create the bridge pipes
+    pipe $l->{r}, $l->{reader_output}; # Open WinpipeRead bridge
+    pipe $l->{writer_input}, $l->{w};  # Open WinpipeWrite bridge
+    # Create threads to handle the reading and writing tasks
+    $l->{reader} = threads->create(\&Win32PipeRead, $l)
+        or die "Win32Pipe reader: CreateThread: $!";
+    $l->{writer} = threads->create(\&Win32PipeWrite, $l)
+        or die "Win32Pipe writer: CreateThread: $!";
+    return;
+}
+
+sub Win32PipeListen {
+    # See "Multithreaded Pipe Server":
+    # http://msdn.microsoft.com/en-us/library/aa365588(v=vs.85).aspx
+}
+
+sub Win32PipeRead {
+    my ($l) = @_;
+    my $event = Win32::Event->new(1, 0);
+    if ( !$event ) { die "Win32Pipe reader: CreateEvent failed: $!\n" }
+    my $ERROR_IO_PENDING = 997;
+    #print "Reading\n";
+    while ( 1 ) {
+        my ($buf, $bytes) = ('X'x512, 0);
+        # Create an OVERLAPPED structure to point to the Event we will wait on
+        my $overlapped = pack('LLLLL',0,0,0,0,${$event});
+        if ( !Win32API::File::ReadFile($l->{pipe}, $buf, length($buf), $bytes,
+                                       $overlapped) ) {
+            # If we received ERROR_IO_PENDING, wait for the IO to complete
+            my $E = Win32API::File::fileLastError();
+            if ( $E != $ERROR_IO_PENDING ) {
+                warn "WIN32Pipe reader: WriteFile: $E\n";
+                last;
+            }
+            if ( !Win32API::File::GetOverlappedResult($l->{pipe}, $overlapped,
+                                                      $bytes, 1) ) {
+                $E = Win32API::File::fileLastError();
+                warn "Win32Pipe reader: GetOverlappedResult: $E\n";
+                last;
+            }
+        }
+        # Warning: GetOverlappedResult does not resize the buffer.
+        syswrite($l->{reader_output}, $buf, $bytes);
+    }
+    print "Reading finished\n";
+    # Schedule a deletion of the modem
+    { lock(@pendingpipes); push @pendingpipes, $l->{pipe} }
+    # Interrupt the select loop (This will never be read)
+    syswrite($l->{reader_output}, 'X');
+}
+
+sub Win32PipeWrite {
+    my ($l) = @_;
+    my ($buf,$bytes) = ('', 0);
+    my $event = Win32::Event->new(1, 0);
+    if ( !$event ) { die "Win32Pipe writer: CreateEvent failed: $!\n" }
+    my $ERROR_IO_PENDING = 997;
+    #print "Writing\n";
+    while (sysread($l->{writer_input}, $buf, 512)>0) {
+        # Create an OVERLAPPED structure to point to the Event we will wait on
+        my $overlapped = pack('LLLLL',0,0,0,0,${$event});
+        #print "W $buf\n";
+        if ( !Win32API::File::WriteFile($l->{pipe}, $buf, 0, [],
+                                        $overlapped) ) {
+            # If we received ERROR_IO_PENDING, wait for the IO to complete
+            my $E = Win32API::File::fileLastError();
+            if ( $E != $ERROR_IO_PENDING ) {
+                warn "WIN32Pipe writer: WriteFile: $E\n";
+                last;
+            }
+            if ( !Win32API::File::GetOverlappedResult($l->{pipe}, $overlapped,
+                                                      $bytes, 1) ) {
+                $E = Win32API::File::fileLastError();
+                warn "Win32Pipe writer: GetOverlappedResult: $E\n";
+                last;
+            }
+        }
+    }
+    print "Writing finished\n";
+    # Schedule a deletion of the modem
+    { lock(@pendingpipes); push @pendingpipes, $l->{pipe} }
+    # Interrupt the select loop (This will never be read)
+    syswrite($l->{reader_output}, 'X');
+}
+
+sub Win32PipeClose {
+    my ($l) = @_;
+    #print "Closing\n";
+    Win32API::File::CloseHandle($l->{pipe})
+        or die "Win32Pipe: CloseHandle: ".Win32API::File::fileLastError()."\n";
+    foreach ( qw/reader writer/ ) {
+        #$l->{$_}->sig('TERM'); # Do I need this? FIXME test more
+        $l->{$_}->detach;
+    }
+    close $l->{reader_output}; close $l->{writer_input};
+    $l->{reader_output} = $l->{writer_input} = undef;
+}
+
+sub Win32PipeCleanup {
+    # Note that splice is not supported on shared arrays.
+    while ( 1 ) {
+        my ($p, $m);
+        #print "Cleaning ".scalar(@pendingpipes)."\n";
+        { lock(@pendingpipes); $p = shift @pendingpipes }
+        last unless $p;
+        foreach ( @modems ) {
+            next unless $_->{serial}{type} eq 'win32pipe';
+            if ( $_->{serial}{pipe} eq $p ) { $m = $_; last }
+        }
+        #print "Found ".($m?$m->{id}:'(unknown)')."\n";
+        delete_modem($m) if $m;
+    }
+}
+
+sub delete_modem {
+    my ($m, $fast) = @_;
+    Win32PipeClose($m->{serial}) if $m->{serial}->{type} eq 'win32pipe';
+    hangup($m);
+    foreach ( $m->{serial}{r} eq $m->{serial}{w} ? 'r' : qw/r w/ ) {
+        $select->remove($m->{serial}{$_});
+        close $m->{serial}{$_};
+    }
+    return if $fast;
+    info($m, 'Modem deleted');
+    for ( my $i = 0; $i < @modems; $i++ )
+        { if ( $modems[$i] eq $m ) { splice @modems, $i, 1; last } }
+}
+
+# Reset the modem settings
+sub reset_modem {
+    my ($m) = @_;
+    $m->{echo} = 1; # E
+    $m->{quiet} = 0; # Q
+    $m->{verbose} = 1; # V
+    $m->{smartmodem} = 4;
+    $m->{sendcid} = 0; # +VCID
+    $m->{faxclass} = 0; # +FCLASS
+    $m->{reg} = [@defreg];
+    # ringing, ringtime, carrier, suspended are reset by hangup().
+}
+
+# Functions to handle console output
+
+sub printprefix {
+    my ($prefix) = @_;
+    return if $streamprintprefix eq $prefix;
+    print "\n" if $streamprintprefix;
+    print $prefix;
+    $streamprintprefix = $prefix;
+}
+
+sub info {
+    my ($m, $str) = @_;
+    printprefix('') if $streamprintprefix;
+    print "[$m->{id}] $str\n";
+}
+
+sub prefixarrow {
+    my ($send) = @_;
+    return '<' if $send > 0;
+    return '>' unless $send;
+    return ' ';
+}
+
+sub printstream {
+    my ($m, $send, $command, $print) =@_;
+    return unless $command or $debug;
+    my $prefix = sprintf("[$m->{id}] %s ", prefixarrow($send));
+    printprefix($prefix);
+    if ( $command ) {
+        $print =~ s/\n(?!$)/\n$streamprintprefix/g;
+        $print =~ s/\r//g;
+        $print =~ s/([^\n])/printable($1)/eg;
+    }
+    else { $print =~ s/(.)/printable($1)/eg }
+    $print = printable($print);
+    print $print;
+}
+
+sub printtransaction {
+    my ($m, $send, $str) = @_;
+    printprefix('') if $streamprintprefix;
+    $str =~ s/(^\r?\n|\r?\n$)//g;
+    my $prefix = sprintf("[$m->{id}] %s ", prefixarrow($send));
+    $str =~ s/\n/\n$prefix/g;
+    print "$prefix$str\n";
+}
+
+sub printable {
+    my ($char) = @_;
+    my $c = ord $char;
+    return sprintf("<%02x>",$c) if $c < 32 or $c > 126;
+    #return '.' if $c < 32 or $c > 126;# or $c == 33;
+    return $char;
+}
+
+sub usage {
+    my ($full) = @_;
+    select(STDERR) unless $full;
+    printf "Usage: %s [options] [-l socket [...]] [socket [...]]\n",
+        lc $progname;
+    pod2usage(-verbose => 99, -exitstatus => 'NOEXIT', -sections => 'OPTIONS')
+        if $full;
+    exit($full?0:2);
+}
+sub version {
+    print $info[4],"\r\n";
+    exit(0);
+}
+
+__DATA__
+#
+# ATduck Dialing Plan
+#
+# [] matches are regexps that are anchored to the beginning of the original
+#    dialing string. The portion of the original dialing string following
+#    the match is used as a parameter.
+#
+# <> matches are patterns that are anchored to the end of the digit-only
+#    dialing string. In this pattern, ? denotes any number. First set of
+#    wildcards are used as a parameter if applicable (e.g. <6???> type=id
+#    means last three digits of the number are the modem ID).
+#
+#
+
+# All numbers with prefix 8 are handled as an IP adress + port number
+[8] type=telnet
+
+# All numbers with prefix 9 are forwarded to the physical modem
+[9] type=extmodem
+
+# Extensions beginning with 6 are modem-to-modem
+<6???> type=id
+
+# Aliases
+<62442> type=alias target=5550
+
+# Shell commands
+<5550> type=shell usepty
+getty -nl"$SHELL" "$M_RATE" "$M_TTYNAME"
+
+<5551> type=shell
+cat /etc/motd | todos
+
+<5552> type=shell
+telnet -E8 nethack.alt.org
+
+<5553> type=shell
+set -e
+again=y
+while [ "$again" = y ]; do
+    if robotfindskitten; then
+        echo -n 'Would you like to play again? [y/N] '
+        again=`head -c 1`
+        echo "$again"
+    else
+        echo 'Sorry, could not start robotfindskitten.'
+        again=n
+    fi
+done
+
+<5555> type=shell usepty
+SLIRP_PATH=./slirp-nandhp-patch
+if [ -e /bin/cygcheck ]; then SLIRP_PATH=$SLIRP_PATH.exe; fi
+$SLIRP_PATH ppp initiate-options "tty $M_TTYPATH"
+
+<5556> type=shell usepty
+./slirp-nandhp-patch "tty $M_TTYPATH"
+
