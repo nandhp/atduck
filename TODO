@@ -1,0 +1,79 @@
+-*- mode:outline -*-
+
+*TESTED DIALERS
+**16-bit MSIE5.01's built-in ShivaPPP dialer
+**Windows 95, NT4, XP DUN
+**Windows NT 3.51 RAS (Wants "real" RS-232; needs "Manual modem commands")
+**MacOS 7.5.5 with MacPPP 2.5.3
+*** MacTCP 2.0.6 or Open Transport 1.1 with TCP/IP 1.1 (Manual DNS)
+**Windows CE 3.0 (QEMU) -- Dubious (Escape problems, dialin broken?)
+
+*TODO
+**************OBJECT-ORIENTED REFACTORING**************
+**************OBJECT-ORIENTED REFACTORING**************
+**************OBJECT-ORIENTED REFACTORING**************
+
+*Enhancements
+**Win32Pipe server
+**Telnet incoming, telnet client
+**Vendor commands. Prefix @.
+***Same parsing format as V.250's +
+****AT@<whatever>?  Inquire current value
+****AT@<whatever>=? Inquire valid values, capability
+****AT@<whatever>=n Set new value
+***@commands
+****AT@A<number>    Create dialing alias
+*****Need some way to delete (AT@Axxxx=), target to self (AT@Axxxx=self?)
+****AT@DEBUG        Debug mode on/off. Same as -D command-line option
+****AT@SECURE       Secure mode on/off.
+*****Disallow certain @commands (alias, debug, ...) and phonenumbers (shell)
+*****Makes ATduck safe to use for compromised input (Like Perl's "taint" mode)
+**Integrate getty (For cygwin)
+**Test virtualbox, dosbox, cygwin, serial port
+**FAX
+
+
+*Proposed class structure
+*ATduck
+**Modem
+**Transport
+***TCP4
+***UNIX
+***Open
+***Win32Pipe
+**Carrier
+***Shell
+***Modem
+***Telnet
+***Dialout
+**Dialplan
+**CallerID
+*Missing
+**Main loops, etc
+**Modem Commands (ATduck::Modem? Extensibility?)
+
+*REFERENCES
+http://home.intekom.com/option/hayesat.htm
+http://docs.kde.org/stable/en/kdenetwork/kppp/
+**DOLLAR HELP
+http://www.usr.com/support/3453c/3453c-crg/chap%2014-displaying%20querying.htm
+**MANY PREFICES
+http://www.cisco.com/en/US/docs/routers/access/2600/software/notes/analogat.html
+**MODEL DIFFERENCES
+http://nemesis.lonestar.org/reference/telecom/modems/index.html
+**FAX REF
+http://fonality.com/trixbox/forums/trixbox-forums/help/hairpinning-outbound-hylafax-iaxmodem-call-inbound-hylafax-iaxmodem-call
+http://www.activexperts.com/activcomport/at/hayes/
+**CALLER ID
+http://melabs.com/resources/callerid.htm
+
+ETSI ES 200 659-3 V1.4.1 (2004-08)
+ETSI Standard
+Access and Terminals (AT);
+Analogue access to the
+Public Switched Telephone Network (PSTN);
+Subscriber line protocol over the local loop for
+display (and related) services;
+Part 3: Data link message and parameter codings
+
+
