@@ -1,0 +1,11 @@
+=head1 ATduck
+
+ATduck is a Hayes-compatible modem emulator written in Perl.
+It can be used in conjunction with SLiRP to provide internet access to older software or computers that only supports a modem.
+
+ATduck supports the virtual serial ports of popular emulators, including VMware, QEMU, VirtualBox, Bochs, BasiliskII, and DOSBox.
+It also supports PTYs, so it can look like a serial port to Linux software.
+It might also work over a physical serial port, but I have no way to test that.
+
+ATduck can be used on Linux and on Cygwin+Windows.
+See the manual page for more information about running ATduck.
