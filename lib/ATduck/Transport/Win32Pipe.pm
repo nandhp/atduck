@@ -26,6 +26,7 @@ sub new_client {
     my $self = $class->SUPER::new_client(@_);
     bless($self, $class);
 
+    die "Win32Pipe: thread-capable Perl required" unless $Config{usethreads};
     # Load modules (we don't want ATduck to depend on these modules unless
     # we use Win32Pipes)
     foreach ( qw/Win32API::File Win32::Event/ ) {

@@ -16,8 +16,9 @@ This module contains the main event loop for ATduck.
 use Time::HiRes;
 use IO::Select;
 use POSIX qw(:sys_wait_h);
-use threads;
-use threads::shared;
+use Config;
+use if $Config{usethreads}, threads;
+use if $Config{usethreads}, threads::shared;
 use warnings;
 use strict;
 
