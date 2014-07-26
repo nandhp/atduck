@@ -1,0 +1,260 @@
+<?xml version="1.0" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title></title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8" />
+<link rev="made" href="mailto:root@localhost" />
+</head>
+
+<body style="background-color: white">
+
+
+
+<ul id="index">
+  <li><a href="#NAME">NAME</a></li>
+  <li><a href="#SYNOPSIS">SYNOPSIS</a></li>
+  <li><a href="#DESCRIPTION">DESCRIPTION</a></li>
+  <li><a href="#OPTIONS">OPTIONS</a></li>
+  <li><a href="#TRANSPORT-ADDRESS-SPECIFICATIONS">TRANSPORT ADDRESS SPECIFICATIONS</a></li>
+  <li><a href="#DIALING-PLAN">DIALING PLAN</a></li>
+  <li><a href="#EXAMPLE">EXAMPLE</a></li>
+  <li><a href="#WINDOWS-NOTES">WINDOWS NOTES</a></li>
+  <li><a href="#BUGS">BUGS</a></li>
+  <li><a href="#COPYRIGHT">COPYRIGHT</a></li>
+  <li><a href="#SEE-ALSO">SEE ALSO</a></li>
+</ul>
+
+<h1 id="NAME">NAME</h1>
+
+<p>atduck - Hayes AT-compatible modem emulator</p>
+
+<h1 id="SYNOPSIS">SYNOPSIS</h1>
+
+<p><b>atduck</b> [<i>options</i>] [<b>-l</b> <i>address</i> [<i>...</i>]] [<i>address</i> [<i>...</i>]]</p>
+
+<h1 id="DESCRIPTION">DESCRIPTION</h1>
+
+<p><b>ATduck</b> emulates a Hayes AT-compatible modem. It is designed to be used with the virtual serial ports of QEMU, VMware, and other emulators; it can also be used with a physical serial port or a PTY.</p>
+
+<p>Common uses of <b>ATduck</b> include using it with SLiRP to provide internet access over PPP, or with Kermit to transfer files.</p>
+
+<h1 id="OPTIONS">OPTIONS</h1>
+
+<dl>
+
+<dt id="listen--l-address"><b>--listen</b>, <b>-l</b> <i>address</i></dt>
+<dd>
+
+<p>Listen for incoming connections on the given <i>address</i> and provide a separate modem to each connection.</p>
+
+</dd>
+<dt id="verbose---debug--D"><b>--verbose</b>, <b>--debug</b>, <b>-D</b></dt>
+<dd>
+
+<p>Include transferred data in the console output.</p>
+
+</dd>
+<dt id="help"><b>--help</b></dt>
+<dd>
+
+<p>Display a brief usage message.</p>
+
+</dd>
+<dt id="version"><b>--version</b></dt>
+<dd>
+
+<p>Display version information.</p>
+
+</dd>
+</dl>
+
+<h1 id="TRANSPORT-ADDRESS-SPECIFICATIONS">TRANSPORT ADDRESS SPECIFICATIONS</h1>
+
+<p><b>ATduck</b> can provide modems using several transport methods. The most methods common are TCP and UNIX sockets. Except where noted, <b>ATduck</b> can either connect to an existing server and provide a single modem or, when used with <b>-l</b>, operate as a server and provide a modem for each incoming connection.</p>
+
+<dl>
+
+<dt id="UNIX:-filename">[<b>UNIX:</b>]<i>filename</i></dt>
+<dd>
+
+<p>Connect to or listen on a UNIX socket in <i>filename</i>.</p>
+
+</dd>
+<dt id="TCP:-hostname:-port">[<b>TCP:</b>][<i>hostname</i><b>:</b>]<i>port</i></dt>
+<dd>
+
+<p>Connect to or listen on <i>port</i> using a TCP socket. If unspecified, <i>hostname</i> defaults to <b>localhost</b>. For a listening socket to accept connections from other computers, the hostname <b>0.0.0.0</b> must be explicitly specified.</p>
+
+</dd>
+<dt id="PTY-:filename-"><b>PTY</b>[<b>:</b><i>filename</i>]</dt>
+<dd>
+
+<p>Create a PTY. If specified, a symbolic link to the PTY is created in <i>filename</i>. This method cannot be used as a listener.</p>
+
+</dd>
+<dt id="OPEN:-filename">[<b>OPEN:</b>]<i>filename</i></dt>
+<dd>
+
+<p>Open the existing named pipe, PTY, serial port, etc. in <i>filename</i>. This method cannot be used as a listener.</p>
+
+</dd>
+</dl>
+
+<h1 id="DIALING-PLAN">DIALING PLAN</h1>
+
+<p>The following dialing plan is configured by default.</p>
+
+<dl>
+
+<dt id="pod5550"><b>5550</b></dt>
+<dd>
+
+<p>Connect to a shell on the host</p>
+
+</dd>
+<dt id="pod5555"><b>5555</b></dt>
+<dd>
+
+<p>SLiRP (PPP mode)</p>
+
+</dd>
+<dt id="pod5556"><b>5556</b></dt>
+<dd>
+
+<p>SLiRP (SLIP mode)</p>
+
+</dd>
+<dt id="xxx"><b>6</b><i>xxx</i></dt>
+<dd>
+
+<p>Call another emulated modem by serial number. For example, dialing <i>6006</i> will connect you to the modem with serial number <i>6</i>. To determine your modem&#39;s serial number use <b>AT+GSN</b>. Note that serial numbers are not fixed between sessions.</p>
+
+</dd>
+</dl>
+
+<h1 id="EXAMPLE">EXAMPLE</h1>
+
+<p>This example suggests ways to set up <b>ATduck</b> with several popular emulators. It does not necessarily illustrate the best way to use <b>ATduck</b> with a given emulator.</p>
+
+<p>First, start <b>ATduck</b> with a transport method that is compatible with the emulator:</p>
+
+<p><b>atduck -l</b> <i>/tmp/modem</i> (to listen on a UNIX socket)</p>
+
+<p><b>atduck -l localhost:</b><i>5555</i> (to listen on a TCP socket)</p>
+
+<p><b>atduck pty:</b><i>/tmp/modem</i> (to create a PTY)</p>
+
+<p>The subsections below specify which transport methods are compatible with each emulator. On Windows, some emulators only support Windows Named Pipes; see <a href="#WINDOWS-NOTES">&quot;WINDOWS NOTES&quot;</a> for more information.</p>
+
+<dl>
+
+<dt id="QEMU-UNIX-TCP-">QEMU [UNIX, TCP]</dt>
+<dd>
+
+<p>To add a serial port in QEMU, use the <b>-serial</b> option:</p>
+
+<p><b>qemu</b> <i>options</i> <b>-serial unix:</b><i>/tmp/modem</i> (for a UNIX socket)</p>
+
+<p><b>qemu</b> <i>options</i> <b>-serial tcp:localhost:</b><i>5555</i> (for a TCP socket)</p>
+
+</dd>
+<dt id="VMware-UNIX-">VMware [UNIX]</dt>
+<dd>
+
+<p>Configure the serial port to <b>Use socket (named pipe)</b> <i>/tmp/modem</i> from <b>Client</b> to <b>An Application</b>.</p>
+
+</dd>
+<dt id="VirtualBox-UNIX-">VirtualBox [UNIX]</dt>
+<dd>
+
+<p>Configure the serial port to use the <b>Host Pipe</b> <i>/tmp/modem</i> (do not select <b>Create Pipe</b>).</p>
+
+</dd>
+<dt id="Bochs-TCP-">Bochs [TCP]</dt>
+<dd>
+
+<p>In your <i>bochsrc</i> file, configure <b>com1</b> to use a TCP socket as follows:</p>
+
+<p><b>com1: enabled=1, mode=socket-server, dev=localhost:</b><i>5555</i></p>
+
+</dd>
+<dt id="DOSBox-TCP-">DOSBox [TCP]</dt>
+<dd>
+
+<p>In your <i>dosbox.conf</i> file, configure <b>serial1</b> to use a TCP socket as follows:</p>
+
+<p><b>serial1=nullmodem transparent:1 server:localhost port:</b><i>5555</i></p>
+
+</dd>
+<dt id="BasiliskII-PTY-">BasiliskII [PTY]</dt>
+<dd>
+
+<p>Configure the Modem Port to use <i>/tmp/modem</i>.</p>
+
+</dd>
+</dl>
+
+<h1 id="WINDOWS-NOTES">WINDOWS NOTES</h1>
+
+<p><b>ATduck</b> has been tested on Cygwin. Please be aware of the following Cygwin-specific issues:</p>
+
+<ul>
+
+<li><p>The Perl module IO::Pty is not available in Cygwin Setup, and must be compiled from source. The module can be downloaded from CPAN.</p>
+
+</li>
+<li><p>SLiRP does not compile due to a preprocessor definition conflict with Cygwin&#39;s libc. A patch against Debian&#39;s SLiRP 1.0.17-3 is included to resolve this issue.</p>
+
+</li>
+</ul>
+
+<p>On Windows, UNIX sockets are not available and many emulators (including VMware and VirtualBox) use Windows Named Pipes instead. <b>ATduck</b> supports Windows Named Pipes if the Perl modules Win32API::File and Win32::Event Perl are available. Install perl-libwin32 in Cygwin Setup.</p>
+
+<p>To use Windows Named Pipes with VMware, configure the serial port to <b>Use socket (named pipe)</b> <b>\\.\pipe\</b><i>modem</i> from <b>Server</b> to <b>An Application</b>. Other emulators may be configured similarly. After starting the emulator, start <b>ATduck</b>:</p>
+
+<p><b>atduck \\.\pipe\</b><i>modem</i></p>
+
+<h1 id="BUGS">BUGS</h1>
+
+<ul>
+
+<li><p>SLiRP&#39;s PPP emulation works only if your computer&#39;s hostname does not resolve to a loopback address like 127.0.0.1 (e.g. from <i>/etc/hosts</i>). A patch against Debian&#39;s SLiRP 1.0.17-3 is included to resolve this issue.</p>
+
+</li>
+<li><p>DTR and flow control depends entirely on support from the emulator&#39;s virtual serial port. In general, this support is completely absent.</p>
+
+</li>
+<li><p>Should be able to attach to a serial port. Should be able to listen on Win32Pipe.</p>
+
+</li>
+<li><p>Should use new scheme for IDs.</p>
+
+</li>
+<li><p>Does not sound like a duck choking on a kazoo.</p>
+
+</li>
+</ul>
+
+<h1 id="COPYRIGHT">COPYRIGHT</h1>
+
+<p>Copyright (C) 2007-2011 nandhp &lt;nandhp@gmail.com&gt;</p>
+
+<p>License GPLv2+: <a href="http://www.gnu.org/licenses/gpl-2.0.html">http://www.gnu.org/licenses/gpl-2.0.html</a></p>
+
+<p>This is open-source software; you may redistribute and/or modify it subject to certain conditions; see license. There is NO WARRANTY, to the extent permitted by law.</p>
+
+<h1 id="SEE-ALSO">SEE ALSO</h1>
+
+<p><a href="http://man.he.net/man1/qemu">qemu(1)</a>, <a href="http://man.he.net/man1/virtualbox">virtualbox(1)</a>, <a href="http://man.he.net/man1/bochs">bochs(1)</a>, <a href="http://man.he.net/man1/dosbox">dosbox(1)</a>, <a href="http://man.he.net/man1/BasiliskII">BasiliskII(1)</a>, <a href="http://man.he.net/man1/tcpser">tcpser(1)</a>, <a href="http://man.he.net/man1/socat">socat(1)</a>, <a href="http://man.he.net/man1/slirp">slirp(1)</a>, <a href="http://man.he.net/man8/getty">getty(8)</a>, <a href="http://man.he.net/man1/gkermit">gkermit(1)</a>, <a href="http://man.he.net/man1/sz">sz(1)</a>, <a href="http://man.he.net/man1/rz">rz(1)</a></p>
+
+<p>ITU-T Recommendation V.250, &quot;Serial asynchronus automatic dialling and control.&quot; July 2003. <a href="http://www.itu.int/rec/T-REC-V.250/en">http://www.itu.int/rec/T-REC-V.250/en</a></p>
+
+<p>U.S. Patent 4,549,302, &quot;Modem with improved escape sequence mechanism to prevent escape in response to random occurrence of escape character in transmitted data.&quot; October 1985. <a href="http://www.google.com/patents/about?id=BFAyAAAAEBAJ">http://www.google.com/patents/about?id=BFAyAAAAEBAJ</a></p>
+
+
+</body>
+
+</html>
+
+
