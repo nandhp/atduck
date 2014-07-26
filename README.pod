@@ -1,4 +1,8 @@
-=head1 ATduck
+=head1 Installing
+
+This script requires IO-Tty and perl must be compiled with threading support. For gentoo, you may want to first build perl with buildpkg (emerge --buildpkg perl) to create a backup binary package, then USE="ithreads" emerge -va perl.
+
+=head2 ATduck
 
 ATduck is a Hayes-compatible modem emulator written in Perl.
 It can be used in conjunction with SLiRP to provide internet access to older software or computers that only supports a modem.
