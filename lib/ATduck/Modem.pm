@@ -362,7 +362,7 @@ sub Z {
     return OK;
 }
 
-sub FCLASS {
+sub FCLA {
     my ($self, $mode, $arg) = @_;
     return ['+FCLASS: 0', 'OK', undef] if $mode == EXT_HELP;
     return [$self->{serviceclass}, 'OK', undef] if $mode == EXT_QUERY;
